@@ -1,4 +1,4 @@
-# memlayer — Complete Testing Guide
+# recallite — Complete Testing Guide
 
 Two ways to test: **Part A** runs the automated suite (41 tests, ~1 second). **Part B** walks you through testing every feature by hand so you see each one working with your own eyes. Do both before any release.
 
@@ -8,7 +8,7 @@ Two ways to test: **Part A** runs the automated suite (41 tests, ~1 second). **P
 
 **Step 1.** Install the package and pytest from the project folder:
 ```bash
-cd memlayer
+cd recallite
 pip install -e .
 pip install pytest
 ```
@@ -28,7 +28,7 @@ Start a chat with **no model attached** first — commands work without any back
 
 ```bash
 python3 -c "
-from memlayer import MemoryStore, MemoryAgent, Guardrails
+from recallite import MemoryStore, MemoryAgent, Guardrails
 g = Guardrails(pii_mode='redact', blocklist=['topsecret'])
 MemoryAgent(MemoryStore('test.db', user_id='me', guardrails=g)).repl()
 "
@@ -139,7 +139,7 @@ It saves (it's your data), **but** now type a normal message like `tell me about
 Exit (`quit`), then relaunch with `secure=True`:
 ```bash
 python3 -c "
-from memlayer import MemoryStore, MemoryAgent
+from recallite import MemoryStore, MemoryAgent
 MemoryAgent(MemoryStore('sec.db', user_id='me', secure=True)).repl()
 "
 ```
@@ -155,22 +155,22 @@ Walk this exact sequence:
 9. **Bypass test:** the lock isn't just in the chat layer — run:
    ```bash
    python3 -c "
-   from memlayer import MemoryStore
+   from recallite import MemoryStore
    MemoryStore('sec.db', user_id='me', secure=True).save('bypass', 'x')"
    ```
    **Expect:** `PermissionError` — even direct Python API calls are blocked.
 
 ### Test 18 — CLI entry point
 ```bash
-memlayer chat --backend none --db cli.db
-memlayer chat --help
+recallite chat --backend none --db cli.db
+recallite chat --help
 ```
 **Expect:** the first opens the REPL with no model; help shows all flags (`--secure`, `--pii`, `--model`, ...).
 
 ### Test 19 — With a real model (Ollama)
 ```bash
 ollama pull llama3.2        # once
-memlayer chat --backend ollama --model llama3.2
+recallite chat --backend ollama --model llama3.2
 ```
 1. `/save age I am 36 years old`
 2. Ask: `how old am I?` → the model must answer **36**, and the reply must **stream** word-by-word, not appear all at once.
@@ -185,7 +185,7 @@ Stop Ollama (or use a wrong port: `--url http://localhost:9999`), send a message
 ```bash
 python3 -c "
 import time
-from memlayer import MemoryStore
+from recallite import MemoryStore
 s = MemoryStore('speed.db')
 t0=time.time()
 [s.save(f'note {i} topic {i%50}', keyword='note') for i in range(5000)]

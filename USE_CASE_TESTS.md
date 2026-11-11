@@ -1,4 +1,4 @@
-# memlayer — Use-Case Test Plan (for your vLLM setup)
+# recallite — Use-Case Test Plan (for your vLLM setup)
 
 Your environment: vLLM serving `openai/gpt-oss-20b` at `http://localhost:8000/v1`.
 
@@ -43,9 +43,9 @@ works even if `pip install -e .` was skipped (it finds the package next to it).
 ## Manual-only checks (things a script cannot see)
 
 1. **Hidden password input** — in a real terminal, type `/enable` with no argument: a `Password (hidden):` prompt must appear and your typing must be invisible.
-2. **Streaming feel** — in `memlayer chat` / `agent.repl()`, long answers must render progressively, not appear after a wait.
+2. **Streaming feel** — in `recallite chat` / `agent.repl()`, long answers must render progressively, not appear after a wait.
 3. **Backend-down behavior** — stop vLLM (Ctrl-C its terminal), send a chat message: you must get a clean `[backend error] Backend unreachable...` line, not a Python traceback. Restart vLLM and confirm chatting resumes.
-4. **Full restart ritual with the real model** — save a fact, quit, relaunch, ask about it. The model must answer correctly from `memlayer.db`.
+4. **Full restart ritual with the real model** — save a fact, quit, relaunch, ask about it. The model must answer correctly from `recallite.db`.
 
 ## Before-release checklist
 

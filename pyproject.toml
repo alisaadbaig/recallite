@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "memlayer"
-version = "0.7.0"
+name = "recallite"
+version = "0.16.0"
 description = "Give any LLM permanent memory — /save facts once, every backend remembers. Works with Ollama, vLLM, Hugging Face, and any OpenAI-compatible server. Zero required dependencies."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -18,13 +18,20 @@ classifiers = [
 ]
 
 [project.scripts]
-memlayer = "memlayer.cli:main"
+recallite = "recallite.cli:main"
 
 [project.optional-dependencies]
 huggingface = ["transformers", "torch", "accelerate"]
 semantic = ["sentence-transformers", "numpy"]
 ner = ["spacy"]
-all = ["transformers", "torch", "accelerate", "sentence-transformers", "numpy", "spacy"]
+crypto = ["cryptography"]
+mcp = ["mcp>=2,<3", "uvicorn"]
+langchain = ["langchain-core"]
+llamaindex = ["llama-index-core"]
+all = ["transformers", "torch", "accelerate", "sentence-transformers", "numpy", "spacy", "cryptography", "mcp>=2,<3", "uvicorn"]
 
 [tool.setuptools.packages.find]
-include = ["memlayer*"]
+include = ["recallite*"]
+
+[tool.setuptools.package-data]
+recallite = ["uat_prompts.json"]

@@ -4,7 +4,7 @@
     python3 examples/chat_openai.py
 """
 import os
-from memlayer import MemoryStore, MemoryAgent, OpenAICompatBackend, Guardrails
+from recallite import MemoryStore, MemoryAgent, OpenAICompatBackend, Guardrails
 
 backend = OpenAICompatBackend(
     model="gpt-4o-mini",                       # any chat model you have access to

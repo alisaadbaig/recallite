@@ -6,7 +6,7 @@ Start the server first, e.g.:
 
 Then:  python3 examples/chat_vllm.py
 """
-from memlayer import MemoryStore, MemoryAgent, OpenAICompatBackend, Guardrails
+from recallite import MemoryStore, MemoryAgent, OpenAICompatBackend, Guardrails
 
 backend = OpenAICompatBackend(
     model="openai/gpt-oss-20b",          # must match `vllm serve` exactly

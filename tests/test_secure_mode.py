@@ -5,7 +5,7 @@ Run:  python3 test_secure_mode.py
 """
 
 import os
-from memlayer import MemoryStore, MemoryAgent
+from recallite import MemoryStore, MemoryAgent
 
 def main():
     DB = "secure_check.db"

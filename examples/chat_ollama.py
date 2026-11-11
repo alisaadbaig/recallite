@@ -3,7 +3,7 @@
     ollama pull llama3.2
     python examples/chat_ollama.py
 """
-from memlayer import MemoryStore, MemoryAgent, OllamaBackend
+from recallite import MemoryStore, MemoryAgent, OllamaBackend
 
 agent = MemoryAgent(
     MemoryStore("mem.db", user_id="ali"),

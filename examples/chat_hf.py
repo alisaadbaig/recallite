@@ -1,9 +1,9 @@
 """Chat with memory using a Hugging Face model fully in-process (no server).
 
-    pip install "memlayer[huggingface]"
+    pip install "recallite[huggingface]"
     python3 examples/chat_hf.py
 """
-from memlayer import MemoryStore, MemoryAgent, HuggingFaceBackend
+from recallite import MemoryStore, MemoryAgent, HuggingFaceBackend
 
 agent = MemoryAgent(
     MemoryStore("hf_memory.db", user_id="ali"),
