@@ -8,6 +8,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-11-11
+
+Release-candidate audit before first PyPI publication.
+
+### Fixed
+- PyPI metadata: `project.urls` were missing entirely (the PyPI page would
+  have had no link to the repository); description/keywords/classifiers
+  refreshed; the `all` extra now actually includes everything optional
+  (presidio-analyzer, langchain-core, llama-index-core were missing).
+
+### Added
+- `recallite --version`.
+
+### Audited (no changes needed)
+- No stale pre-rename references outside intentional legacy fallbacks and
+  historical changelog entries; all five examples compile; every extra
+  referenced in docs exists; README snippet run-check (self-contained
+  blocks execute; fragments are intentional); demo GIF present and
+  referenced; LICENSE intact.
+
 ## [0.17.0] — 2026-11-11
 
 ### Added

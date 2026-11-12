@@ -16,7 +16,7 @@ from .adapters import (
     AnthropicBackend, HuggingFaceBackend,
 )
 
-__version__ = "0.17.0"
+__version__ = "0.17.1"
 __all__ = ["MemoryStore", "MemoryAgent", "Guardrails", "BaseBackend",
            "OllamaBackend", "OpenAICompatBackend", "AnthropicBackend",
            "HuggingFaceBackend", "TaskManager", "fetch_url_text",

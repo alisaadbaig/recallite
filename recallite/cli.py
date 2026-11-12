@@ -20,6 +20,9 @@ from .adapters import OllamaBackend, OpenAICompatBackend, HuggingFaceBackend
 def main() -> None:
     p = argparse.ArgumentParser(prog="recallite",
                                 description="Persistent memory for any LLM.")
+    from . import __version__
+    p.add_argument("--version", action="version",
+                   version=f"recallite {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     chat = sub.add_parser("chat", help="interactive memory chat")

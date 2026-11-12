@@ -4,18 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "recallite"
-version = "0.17.0"
-description = "Give any LLM permanent memory — /save facts once, every backend remembers. Works with Ollama, vLLM, Hugging Face, and any OpenAI-compatible server. Zero required dependencies."
+version = "0.17.1"
+description = "SQLite for AI memory: give any LLM permanent, lifecycle-aware memory — plus a vault-free privacy gateway and an MCP server. Works with Ollama, vLLM, Hugging Face, Claude, and any OpenAI-compatible backend. Zero required dependencies."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Ali" }]
-keywords = ["llm", "memory", "rag", "ollama", "vllm", "huggingface", "personalization"]
+keywords = ["llm", "memory", "rag", "ollama", "vllm", "huggingface",
+            "mcp", "privacy", "dlp", "sqlite", "agent-memory",
+            "personalization"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Database",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
 ]
+
+[project.urls]
+Homepage = "https://github.com/alisaadbaig/recallite"
+Repository = "https://github.com/alisaadbaig/recallite"
+Issues = "https://github.com/alisaadbaig/recallite/issues"
+Changelog = "https://github.com/alisaadbaig/recallite/blob/main/CHANGELOG.md"
 
 [project.scripts]
 recallite = "recallite.cli:main"
@@ -29,7 +40,9 @@ mcp = ["mcp>=2,<3", "uvicorn"]
 langchain = ["langchain-core"]
 llamaindex = ["llama-index-core"]
 presidio = ["presidio-analyzer"]
-all = ["transformers", "torch", "accelerate", "sentence-transformers", "numpy", "spacy", "cryptography", "mcp>=2,<3", "uvicorn"]
+all = ["transformers", "torch", "accelerate", "sentence-transformers",
+       "numpy", "spacy", "cryptography", "mcp>=2,<3", "uvicorn",
+       "presidio-analyzer", "langchain-core", "llama-index-core"]
 
 [tool.setuptools.packages.find]
 include = ["recallite*"]
