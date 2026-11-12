@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "recallite"
-version = "0.16.0"
+version = "0.17.0"
 description = "Give any LLM permanent memory — /save facts once, every backend remembers. Works with Ollama, vLLM, Hugging Face, and any OpenAI-compatible server. Zero required dependencies."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -28,6 +28,7 @@ crypto = ["cryptography"]
 mcp = ["mcp>=2,<3", "uvicorn"]
 langchain = ["langchain-core"]
 llamaindex = ["llama-index-core"]
+presidio = ["presidio-analyzer"]
 all = ["transformers", "torch", "accelerate", "sentence-transformers", "numpy", "spacy", "cryptography", "mcp>=2,<3", "uvicorn"]
 
 [tool.setuptools.packages.find]

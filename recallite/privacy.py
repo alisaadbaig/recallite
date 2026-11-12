@@ -322,9 +322,169 @@ class PrivacyShield:
         text, _spans = self._stash_tokens(text)
         found = self._detect(text)
         counts: dict[str, int] = {}
-        for cat, vals in found.items():
-            for v in set(vals):
-                if v in text:
-                    counts[cat] = counts.get(cat, 0) + text.count(v)
-                    text = text.replace(v, f"[{cat.upper()}]")
+        # longest-first, exactly like sanitize(): otherwise replacing a
+        # short value (a DOB) inside a longer detected span (an NER PERSON
+        # covering "Name DOB 05/14/1985") breaks the longer value's lookup
+        # and the name leaks — found by the streaming NER test
+        pairs = sorted(((cat, v) for cat, vals in found.items()
+                        for v in set(vals)),
+                       key=lambda p: len(p[1]), reverse=True)
+        for cat, v in pairs:
+            if v in text:
+                counts[cat] = counts.get(cat, 0) + text.count(v)
+                text = text.replace(v, f"[{cat.upper()}]")
         return self._unstash_tokens(text, _spans), {"redacted": counts}
+
+
+# ---------------------------------------------------------------------------
+# incremental output DLP — streaming without chunk-boundary leaks
+# ---------------------------------------------------------------------------
+
+class StreamScanner:
+    """Scan a model's output stream incrementally and emit sanitized text
+    with low latency, WITHOUT the classic chunk-boundary leak (an SSN
+    split across two chunks evading per-chunk scanning).
+
+        scanner = StreamScanner(shield)
+        for chunk in upstream:
+            yield scanner.feed(chunk)     # may be "" while holding back
+        yield scanner.flush()
+
+    How it stays safe:
+    - Emitted text always trails the stream frontier by at least
+      HOLDBACK characters, so any detectable pattern that could still be
+      completed by future chunks lies entirely in the unemitted tail
+      (every pattern we detect is far shorter than HOLDBACK).
+    - The emit cut happens only at whitespace, so a token
+      ([EMAIL_1a2b3c4d5e]), an email address, or any other unbroken run
+      can never straddle the boundary half-scanned.
+    - Each emitted span is scan_output()-sanitized as a whole; flush()
+      scans whatever remains. Redaction counts accumulate in .report.
+
+    Latency cost: emission trails the frontier by ~HOLDBACK characters
+    (a couple of sentences). A pathological stream with no whitespace at
+    all buffers until flush — correct, just not incremental.
+    """
+
+    HOLDBACK = 96          # > the longest detectable pattern or token
+
+    def __init__(self, shield: "PrivacyShield"):
+        self.shield = shield
+        self._raw = ""
+        self.report: dict[str, int] = {}
+
+    def _scan(self, text: str) -> str:
+        out, rep = self.shield.scan_output(text)
+        for k, v in rep["redacted"].items():
+            self.report[k] = self.report.get(k, 0) + v
+        return out
+
+    def _match_spans(self, text: str) -> list[tuple[int, int]]:
+        """Spans of every detectable value currently in the buffer. The
+        frontier is >= HOLDBACK past any candidate cut, so any pattern
+        shorter than HOLDBACK that could straddle the cut is already
+        COMPLETE in the buffer and therefore in this list."""
+        PAD = 8
+        spans = []
+        # context-gated patterns: protect the FULL match (gate + value) —
+        # a cut between "MRN " and its value made each half unmatchable
+        # and leaked the value (found by the streaming NER test)
+        for pattern in _CONTEXT_PATTERNS.values():
+            for m in pattern.finditer(text):
+                spans.append((max(0, m.start(0) - PAD), m.end(0) + PAD))
+        found = detect_sensitive(text,
+                                 name_detector=self.shield.name_detector,
+                                 strict=self.shield.strict)
+        for vals in found.values():
+            for v in set(vals):
+                start = 0
+                while True:
+                    i = text.find(v, start)
+                    if i < 0:
+                        break
+                    spans.append((max(0, i - PAD), i + len(v) + PAD))
+                    start = i + 1
+        return spans
+
+    def feed(self, chunk: str) -> str:
+        self._raw += chunk
+        limit = len(self._raw) - self.HOLDBACK
+        if limit <= 0:
+            return ""
+        spans = self._match_spans(self._raw)
+
+        def whitespace_cut(at: int) -> int:
+            for i in range(at, 0, -1):
+                if self._raw[i - 1].isspace():
+                    return i
+            return 0
+
+        # cut at whitespace (no unbroken run — email, privacy token — can
+        # straddle), then move it left past any detected match it would
+        # split (a spaced PAN or phone number is NOT an unbroken run: the
+        # first version of this scanner leaked card numbers split at
+        # their internal spaces — caught by the every-position harness)
+        cut = whitespace_cut(limit)
+        moved = True
+        while moved and cut > 0:
+            moved = False
+            for s, e in spans:
+                if s < cut < e:
+                    cut = whitespace_cut(s)
+                    moved = True
+                    break
+        if cut <= 0:
+            return ""
+        emit, self._raw = self._raw[:cut], self._raw[cut:]
+        return self._scan(emit)
+
+    def flush(self) -> str:
+        emit, self._raw = self._raw, ""
+        return self._scan(emit) if emit else ""
+
+
+class PresidioDetector:
+    """Microsoft Presidio adapter for the name-detector seam
+    (pip install "recallite[presidio]"). Maps Presidio entities onto
+    recallite categories; anything mapping to ssn/credit_card is still
+    governed by the structural never-restore policy, and detection stays
+    layered — Presidio ADDS recall on top of the built-in patterns.
+
+        shield = PrivacyShield("tokenize", name_detector=PresidioDetector())
+    """
+
+    DEFAULT_MAP = {"PERSON": "person", "LOCATION": "location",
+                   "NRP": "org", "ORGANIZATION": "org",
+                   "EMAIL_ADDRESS": "email", "PHONE_NUMBER": "phone",
+                   "US_SSN": "ssn", "CREDIT_CARD": "credit_card",
+                   "IP_ADDRESS": "ip_address",
+                   "MEDICAL_LICENSE": "mrn"}
+
+    def __init__(self, entities: dict | None = None,
+                 language: str = "en", score_threshold: float = 0.4):
+        self.map = dict(entities or self.DEFAULT_MAP)
+        self.language = language
+        self.score_threshold = score_threshold
+        self._engine = None
+        import threading
+        self._lock = threading.Lock()
+
+    def _load(self):
+        if self._engine is None:
+            from presidio_analyzer import AnalyzerEngine
+            self._engine = AnalyzerEngine()
+        return self._engine
+
+    def detect(self, text: str) -> dict[str, list[str]]:
+        engine = self._load()
+        with self._lock:
+            results = engine.analyze(text=text, language=self.language,
+                                     entities=list(self.map))
+        found: dict[str, list[str]] = {}
+        for r in results:
+            if r.score < self.score_threshold:
+                continue
+            cat = self.map.get(r.entity_type)
+            if cat:
+                found.setdefault(cat, []).append(text[r.start:r.end])
+        return found

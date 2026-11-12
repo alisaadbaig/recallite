@@ -8,6 +8,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-11-11
+
+### Added
+- **Incremental streaming DLP** — the gateway streams for real (`--stream-mode incremental`, now the default): upstream SSE deltas pass through a `StreamScanner` with a 96-char holdback window; cuts only at whitespace and never inside a detected span *or its gating context*, so secrets split across chunk boundaries are caught whole. Tool-call argument deltas are buffered and emitted post-scan. Non-SSE upstreams fall back to buffered-as-one-chunk (content is never silently dropped). Verified by an every-split-position adversarial harness (every boundary of every secret × chunk sizes 1–17, with NER active). `--stream-mode buffered` retained.
+- **Presidio adapter** — `PresidioDetector` mounts Microsoft Presidio on the existing name-detector seam (`recallite[presidio]` extra): entity→category mapping, score threshold, layered on top of built-in patterns; live-tested.
+
+### Fixed
+- **Buffered output DLP could leak on overlapping detections** (present since v0.14, found while building the streaming harness): when an NER person-span contained a regex value (…"Name DOB 05/14/1985"…), shortest-first replacement broke the longer span's lookup and the name passed through. `scan_output` now replaces longest-first, as `sanitize` always did; regression-tested on both paths.
+- First StreamScanner design leaked spaced card numbers split at internal whitespace (whitespace-cut assumption); second leaked context-gated values cut off from their gate ("MRN " / value). Both caught by the harness before release; cuts are now span-aware with context padding.
+
 ## [0.16.0] — 2026-11-11
 
 ### Changed

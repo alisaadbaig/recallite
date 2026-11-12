@@ -186,6 +186,34 @@ key files are a minimal credential system (no rotation automation, no
 OAuth); no rate limiting; compliance requires risk assessment, BAAs/
 contracts, and operational controls no library can provide.
 
+## Incremental streaming DLP (v0.17)
+
+`recallite gateway` now streams for real. Model deltas pass through a
+`StreamScanner`: emission trails the stream frontier by a 96-character
+holdback window, cuts happen only at whitespace, and the cut is moved off
+any detected span *including its gating context* — so an SSN, a spaced
+card number, or "MRN 908123" split across upstream chunks is still caught
+whole. Tool-call argument deltas are buffered and emitted only after a
+full scan (JSON fragments cannot be scanned piecewise). Verified by an
+every-split-position adversarial harness (every boundary of every secret,
+plus 1–17-char chunk sizes, with NER enabled). Latency cost: output trails
+by roughly a sentence. A no-whitespace stream buffers until flush —
+correct, just not incremental. `--stream-mode buffered` remains available.
+
+Building this found and fixed a bug in the BUFFERED path too: overlapping
+detections (an NER person-span containing a DOB) were replaced
+shortest-first, breaking the longer value's replacement — the name could
+leak. Output scanning now replaces longest-first, like sanitize always did.
+
+## Presidio detector (v0.17)
+
+`PrivacyShield(name_detector=PresidioDetector())` mounts Microsoft
+Presidio on the same seam as the spaCy detector
+(`pip install "recallite[presidio]"`): configurable entity→category
+mapping and score threshold, layered ON TOP of the built-in patterns.
+Entities mapping to ssn/credit_card stay governed by the structural
+never-restore policy.
+
 ## What ships in which phase
 
 - **P1 (this release):** `recallite/privacy.py` engine (modes, sessions,

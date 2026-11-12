@@ -181,10 +181,18 @@ def test_make_name_detector_strict_raises_when_missing(monkeypatch):
 
 # =========================================================== gateway level
 
-class CapturingUpstream:
-    """OpenAI-compatible mock that records EVERY outbound payload."""
+def _chunks(s, n):
+    return [s[i:i + n] for i in range(0, len(s), n)] or [""]
 
-    def __init__(self, reply="noted."):
+
+class CapturingUpstream:
+    """OpenAI-compatible mock that records EVERY outbound payload.
+    With sse=True it streams replies as real SSE delta chunks of size
+    `chunk` (so patterns split across chunk boundaries)."""
+
+    def __init__(self, reply="noted.", sse=False, chunk=7):
+        self.sse = sse
+        self.chunk = chunk
         import http.server
         import socketserver
         self.captured = []
@@ -196,6 +204,41 @@ class CapturingUpstream:
                     int(self.headers["Content-Length"])).decode()
                 outer.captured.append(body)
                 payload = outer.reply(body)
+                wants_stream = '"stream": true' in body.replace(" ", "")                    .replace('"stream":true', '"stream": true') or                     json.loads(body).get("stream") is True
+                if wants_stream and outer.sse:
+                    # genuine SSE: split the reply into small delta chunks
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    if isinstance(payload, dict) and "tool_calls" in payload:
+                        deltas = [{"tool_calls": [
+                            {"index": 0, "id": "s1", "type": "function",
+                             "function": {"name": payload["tool_calls"][0]
+                                          ["function"]["name"],
+                                          "arguments": frag}}]}
+                            for frag in _chunks(payload["tool_calls"][0]
+                                                ["function"]["arguments"],
+                                                outer.chunk)]
+                    else:
+                        text = payload["content"] if isinstance(payload,
+                                                                dict)                             else payload
+                        deltas = [{"content": frag}
+                                  for frag in _chunks(text, outer.chunk)]
+                    for d in deltas:
+                        ev = {"id": "mock", "object": "chat.completion.chunk",
+                              "model": "mock",
+                              "choices": [{"index": 0, "delta": d,
+                                           "finish_reason": None}]}
+                        self.wfile.write(b"data: " + json.dumps(ev).encode()
+                                         + b"\n\n")
+                    fin = {"id": "mock", "object": "chat.completion.chunk",
+                           "model": "mock",
+                           "choices": [{"index": 0, "delta": {},
+                                        "finish_reason": "stop"}]}
+                    self.wfile.write(b"data: " + json.dumps(fin).encode()
+                                     + b"\n\n")
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    return
                 if isinstance(payload, str):
                     payload = {"role": "assistant", "content": payload}
                 out = json.dumps({"id": "mock", "object": "chat.completion",
@@ -355,7 +398,7 @@ def test_gateway_streaming_is_scanned_before_emission(stack):
     with urllib.request.urlopen(req, timeout=20) as resp:
         raw = resp.read().decode()
     assert raw.startswith("data: ") and "[DONE]" in raw
-    assert SSN not in raw
+    assert SSN not in raw and "[SSN]" in raw     # content survives fallback
 
 
 def test_gateway_logs_carry_no_values(stack, caplog):
@@ -817,3 +860,134 @@ def test_mcp_http_transport_requires_auth(tmp_path):
     finally:
         server.should_exit = True
         th.join(timeout=5)
+
+
+# ==================================== v0.17: incremental streaming DLP
+
+def _read_sse(url, key, body):
+    req = urllib.request.Request(url + "/v1/chat/completions",
+                                 data=json.dumps(body).encode(),
+                                 method="POST")
+    req.add_header("Authorization", f"Bearer {key}")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        raw = resp.read().decode()
+    events = [json.loads(l[5:].strip()) for l in raw.splitlines()
+              if l.startswith("data:") and l[5:].strip() != "[DONE]"]
+    text = "".join((e["choices"][0]["delta"] or {}).get("content", "")
+                   for e in events if e.get("choices"))
+    return raw, events, text
+
+
+def test_incremental_streaming_is_actually_incremental(tmp_path):
+    """Multiple content chunks must reach the client (not one buffered
+    blob), the reassembled text must be sanitized even when the SSN is
+    split across upstream chunk boundaries, and the final chunk carries
+    the privacy report."""
+    long_prose = ("Here is a long answer that keeps going with many plain "
+                  "words so the holdback window is cleared several times "
+                  "over. ") * 4
+    up = CapturingUpstream(reply=f"{long_prose} the ssn is {SSN} and the "
+                                 f"card is {PAN}. {long_prose}",
+                           sse=True, chunk=7)   # splits SSN/PAN mid-pattern
+    httpd, url, key, _ = _serve(tmp_path, up)
+    try:
+        raw, events, text = _read_sse(
+            url, key, {"model": "mock", "stream": True,
+                       "messages": [{"role": "user", "content": "go"}]})
+        content_chunks = [e for e in events
+                          if (e["choices"][0]["delta"] or {}).get("content")]
+        assert len(content_chunks) >= 3        # genuinely incremental
+        assert SSN not in raw and "4111" not in raw
+        assert "[SSN]" in text and "[CREDIT_CARD]" in text
+        final = events[-1]
+        assert final["recallite"]["stream"] == "incremental"
+        assert final["recallite"]["output_redacted"]["ssn"] == 1
+        assert final["choices"][0]["finish_reason"] == "stop"
+    finally:
+        httpd.shutdown()
+        up.shutdown()
+
+
+def test_streaming_tool_call_arguments_buffered_and_scanned(tmp_path):
+    up = CapturingUpstream(
+        reply={"role": "assistant", "content": None,
+               "tool_calls": [{"id": "s1", "type": "function",
+                               "function": {"name": "store",
+                                            "arguments": json.dumps(
+                                                {"ssn": SSN,
+                                                 "card": PAN})}}]},
+        sse=True, chunk=5)                     # args arrive in 5-char frags
+    httpd, url, key, _ = _serve(tmp_path, up)
+    try:
+        raw, events, _ = _read_sse(
+            url, key, {"model": "mock", "stream": True,
+                       "messages": [{"role": "user", "content": "go"}]})
+        assert SSN not in raw and "4111" not in raw
+        final = events[-1]
+        calls = final["choices"][0]["delta"]["tool_calls"]
+        assert calls[0]["function"]["name"] == "store"
+        args = calls[0]["function"]["arguments"]
+        assert "[SSN]" in args and "[CREDIT_CARD]" in args
+    finally:
+        httpd.shutdown()
+        up.shutdown()
+
+
+def test_buffered_stream_mode_still_available(tmp_path):
+    up = CapturingUpstream(reply=f"leaky {SSN}", sse=True, chunk=7)
+    httpd, url, key, _ = _serve(tmp_path, up, stream_mode="buffered")
+    try:
+        raw, events, text = _read_sse(
+            url, key, {"model": "mock", "stream": True,
+                       "messages": [{"role": "user", "content": "go"}]})
+        assert SSN not in raw and "[SSN]" in text
+    finally:
+        httpd.shutdown()
+        up.shutdown()
+
+
+@ner_only
+def test_streaming_with_ner_names_protected(tmp_path):
+    up = CapturingUpstream(
+        reply=("The patient record shows " * 6) +
+              f"Patient John Smith DOB 05/14/1985 has MRN 908123. " +
+              ("Additional plain narrative text follows here. " * 6),
+        sse=True, chunk=9)
+    httpd, url, key, _ = _serve(tmp_path, up, ner="auto")
+    try:
+        raw, events, text = _read_sse(
+            url, key, {"model": "mock", "stream": True,
+                       "messages": [{"role": "user", "content": "go"}]})
+        assert "John Smith" not in raw and "05/14/1985" not in raw
+        assert "908123" not in raw
+    finally:
+        httpd.shutdown()
+        up.shutdown()
+
+
+def test_scan_output_overlapping_spans_longest_first():
+    """Regression (buffered path had it since v0.14): when an NER span
+    contains a regex value (PERSON 'Name DOB 05/14/1985' containing the
+    DOB), replacing the short one first broke the long one's lookup and
+    the name leaked."""
+    class WideNER:
+        def detect(self, text):
+            return {"person": ["John Smith DOB 05/14/1985"]} \
+                if "John Smith" in text else {}
+    sh = PrivacyShield("tokenize", name_detector=WideNER())
+    out, rep = sh.scan_output("Patient John Smith DOB 05/14/1985 admitted")
+    assert "John Smith" not in out and "05/14/1985" not in out
+    assert "[PERSON]" in out
+
+
+def test_presidio_adapter_plugs_into_the_seam(tmp_path):
+    pytest.importorskip("presidio_analyzer")
+    from recallite.privacy import PresidioDetector
+    det = PresidioDetector()
+    found = det.detect("Patient John Smith lives in Dallas, "
+                       "email pat.tester@example.com")
+    assert "John Smith" in found.get("person", [])
+    sh = PrivacyShield("tokenize", name_detector=det)
+    out, rep = sh.sanitize(PATIENT_LINE, session=PrivacySession())
+    assert "John Smith" not in out and "[PERSON_" in out

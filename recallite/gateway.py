@@ -62,6 +62,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .privacy import (PrivacyShield, PrivacySession, PrivacyError,
+                      StreamScanner,
                       detect_sensitive, make_name_detector,
                       NEVER_RESTORE, BLOCKING)
 
@@ -139,7 +140,8 @@ class GatewayState:
     def __init__(self, upstream: str, mode: str, gateway_keys: dict,
                  restore_keys: dict, restore_allow: set[str],
                  restore_destinations: set[str], session_ttl: int = 900,
-                 ner: str = "auto"):
+                 ner: str = "auto", stream_mode: str = "incremental"):
+        self.stream_mode = stream_mode
         self.upstream = upstream.rstrip("/")
         self.mode = mode
         detector = make_name_detector(ner)   # strict raises here: fail closed
@@ -441,6 +443,148 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     # -- the sanitizing proxy --------------------------------------------
 
+    def _sse(self, obj: dict):
+        self.wfile.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
+
+    def _chat_stream(self, upstream_body: dict, s: _Session, counts: dict,
+                     sid: str, tenant: str):
+        """True incremental streaming: upstream SSE deltas flow through a
+        StreamScanner (holdback window — no chunk-boundary leaks; see
+        privacy.StreamScanner). Content streams as it clears the window;
+        tool-call deltas are BUFFERED and emitted only after a full scan,
+        because function arguments arrive as json fragments that cannot be
+        safely scanned piecewise. Fail closed: any mid-stream error stops
+        emission."""
+        upstream_body["stream"] = True
+        try:
+            req = urllib.request.Request(
+                self.state.upstream + "/chat/completions",
+                data=json.dumps(upstream_body).encode("utf-8"),
+                headers={"Content-Type": "application/json",
+                         "Accept": "text/event-stream"}, method="POST")
+            resp = urllib.request.urlopen(req, timeout=300)
+        except Exception:
+            return self._error(502, "Upstream model unreachable.")
+
+        # fallback: upstream that answers JSON even when asked to stream
+        # (e.g. simple mocks/proxies) — scrub buffered, emit as one chunk,
+        # never silently drop the content
+        ctype = (resp.headers.get("Content-Type") or "")
+        if "text/event-stream" not in ctype:
+            try:
+                with resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except Exception:
+                return self._error(502, "Upstream model unreachable.")
+            report = {"sanitized": counts, "session": sid,
+                      "mode": self.state.mode, "stream": "buffered-fallback"}
+            data = self._scrub_response(data, report)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self._sse({"id": data.get("id", "recallite"),
+                       "object": "chat.completion.chunk",
+                       "model": data.get("model"),
+                       "choices": [{"index": 0, "delta":
+                                    {"content": (c.get("message") or {})
+                                     .get("content", "")},
+                                    "finish_reason": "stop"}
+                                   for c in data.get("choices", [])[:1]],
+                       "recallite": report})
+            self.wfile.write(b"data: [DONE]\n\n")
+            return
+
+        scanner = StreamScanner(self.state.shield)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+
+        chunk_id, model = "recallite", upstream_body.get("model")
+        tool_frags: dict = {}            # index -> {id, name, arguments}
+        finish = "stop"
+        try:
+            with resp:
+                for raw in resp:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        ev = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    chunk_id = ev.get("id", chunk_id)
+                    model = ev.get("model", model)
+                    for ch in ev.get("choices", []):
+                        if ch.get("finish_reason"):
+                            finish = ch["finish_reason"]
+                        delta = ch.get("delta") or {}
+                        piece = delta.get("content")
+                        if piece:
+                            safe = scanner.feed(piece)
+                            if safe:
+                                self._sse({"id": chunk_id,
+                                           "object": "chat.completion.chunk",
+                                           "model": model,
+                                           "choices": [{"index": 0, "delta":
+                                                        {"content": safe},
+                                                        "finish_reason": None}]})
+                        for tc in (delta.get("tool_calls") or []):
+                            idx = tc.get("index", 0)
+                            frag = tool_frags.setdefault(
+                                idx, {"id": "", "name": "", "arguments": ""})
+                            frag["id"] = tc.get("id") or frag["id"]
+                            fn = tc.get("function") or {}
+                            frag["name"] = fn.get("name") or frag["name"]
+                            frag["arguments"] += fn.get("arguments") or ""
+        except PrivacyError as e:
+            log.warning("stream aborted (fail closed) tenant=%s: %s",
+                        tenant, e)
+            self._sse({"error": {"message": str(e), "type": "recallite"}})
+            self.wfile.write(b"data: [DONE]\n\n")
+            return
+        except Exception:
+            self._sse({"error": {"message": "Upstream stream failed.",
+                                 "type": "recallite"}})
+            self.wfile.write(b"data: [DONE]\n\n")
+            return
+
+        tail = scanner.flush()
+        final_delta: dict = {}
+        if tail:
+            final_delta["content"] = tail
+        if tool_frags:
+            calls = []
+            for idx in sorted(tool_frags):
+                frag = tool_frags[idx]
+                args, rep = self.state.shield.scan_output(frag["arguments"])
+                for k, v in rep["redacted"].items():
+                    scanner.report[k] = scanner.report.get(k, 0) + v
+                calls.append({"index": idx, "id": frag["id"],
+                              "type": "function",
+                              "function": {"name": frag["name"],
+                                           "arguments": args}})
+            final_delta["tool_calls"] = calls
+        report = {"sanitized": counts, "session": sid,
+                  "mode": self.state.mode, "stream": "incremental"}
+        if scanner.report:
+            report["output_redacted"] = scanner.report
+        self._sse({"id": chunk_id, "object": "chat.completion.chunk",
+                   "model": model,
+                   "choices": [{"index": 0, "delta": final_delta,
+                                "finish_reason": finish}],
+                   "recallite": report})
+        self.wfile.write(b"data: [DONE]\n\n")
+        log.info("chat-stream tenant=%s session=%s sanitized=%s redacted=%s",
+                 tenant, sid[:8], counts, scanner.report)
+
     def _chat(self, body: dict, tenant: str):
         unknown = set(body) - ALLOWED_TOP
         if unknown:
@@ -478,7 +622,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return self._error(400, str(e))
 
         upstream_body["messages"] = clean_msgs
-        upstream_body["stream"] = False      # scan complete responses
+        if body.get("stream") and self.state.stream_mode == "incremental":
+            return self._chat_stream(upstream_body, s, counts, sid, tenant)
+        upstream_body["stream"] = False      # buffered: scan complete responses
         try:
             req = urllib.request.Request(
                 self.state.upstream + "/chat/completions",
@@ -519,7 +665,8 @@ def serve(upstream: str, mode: str = "tokenize", port: int = 8787,
           restore: str = "", key_file: str | None = None,
           session_ttl: int = 900, ner: str = "auto",
           restore_key_file: str | None = None,
-          restore_destinations: str = "app") -> ThreadingHTTPServer:
+          restore_destinations: str = "app",
+          stream_mode: str = "incremental") -> ThreadingHTTPServer:
     """Build and return the server (caller runs serve_forever)."""
     gw_key = load_or_create_key(key_file, DEFAULT_KEY_FILE, "gateway")
     rs_key = load_or_create_key(restore_key_file, DEFAULT_RESTORE_KEY_FILE,
@@ -537,7 +684,7 @@ def serve(upstream: str, mode: str = "tokenize", port: int = 8787,
     GatewayHandler.state = GatewayState(
         upstream, mode, gateway_keys, restore_keys, restore_allow,
         {d.strip() for d in restore_destinations.split(",") if d.strip()},
-        session_ttl, ner=ner)
+        session_ttl, ner=ner, stream_mode=stream_mode)
     return ThreadingHTTPServer(("127.0.0.1", port), GatewayHandler)
 
 
@@ -559,6 +706,11 @@ def main(argv=None) -> int:
                    help="name detection: auto (use if installed), off, or "
                         "strict (REQUIRED — refuse all content without it)")
     p.add_argument("--session-ttl", type=int, default=900)
+    p.add_argument("--stream-mode", choices=["incremental", "buffered"],
+                   default="incremental",
+                   help="incremental: true streaming through a holdback "
+                        "DLP scanner; buffered: scan complete responses "
+                        "before emitting")
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(message)s")
@@ -566,7 +718,8 @@ def main(argv=None) -> int:
         httpd = serve(a.upstream, a.mode, a.port, a.restore, a.key_file,
                       a.session_ttl, ner=a.ner,
                       restore_key_file=a.restore_key_file,
-                      restore_destinations=a.restore_destinations)
+                      restore_destinations=a.restore_destinations,
+                      stream_mode=a.stream_mode)
     except (PrivacyError, ValueError) as e:
         print(f"[gateway] refusing to start: {e}")
         return 1
